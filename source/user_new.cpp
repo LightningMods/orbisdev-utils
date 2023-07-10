@@ -6,6 +6,7 @@
 #include <memory>
 #include <algorithm>
 #include <sstream>
+#include <cstddef>
 #include "user_mem.h"
 
 void *user_new(std::size_t size) throw(std::bad_alloc)

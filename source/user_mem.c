@@ -3,38 +3,101 @@
 #include <stdarg.h>
 #include <string.h>
 #include "user_mem.h"
-
+#include <fcntl.h>
+#ifndef OO_PS4_TOOLCHAIN
 #include <orbis/libSceLibcInternal.h>
+#else
+#include "mspace.h"
+#endif
 #include <orbis/libkernel.h>
 static OrbisMspace s_mspace = 0;
 static OrbisMallocManagedSize s_mmsize;
 static void *s_mem_start = 0;
 static size_t s_mem_size = MEM_SIZE;
 
-int malloc_init(void)
-{
-	int res;
+off_t phyAddr = 0;
 
-	if (s_mspace)
-		return 0;
+#define MB(x)   ((size_t) (x) << 20)
+#define KB(x)   ((size_t) (x) << 10)
 
-	res = sceKernelReserveVirtualRange(&s_mem_start, MEM_SIZE, 0, MEM_ALIGN);
-	if (res < 0)
-		return 1;
+static size_t maxheap = MB(512);
+#define SCE_OK 0
+#define SCE_KERNEL_WB_ONION 0
 
-	res = sceKernelMapNamedSystemFlexibleMemory(&s_mem_start, MEM_SIZE, SCE_KERNEL_PROT_CPU_RW, SCE_KERNEL_MAP_FIXED, "User Mem");
-	if (res < 0)
-		return 1;
+void log_for_memory(char * format, ...) {
+  //Check the length of the format string.
+  // If it is too long, return immediately.
+  if (strlen(format) > 1000) {
+    return;
+  }
 
-	s_mspace = sceLibcMspaceCreate("User Mspace", s_mem_start, s_mem_size, 0);
-	if (!s_mspace)
-		return 1;
+  // Initialize a buffer to hold the formatted log message.
+  char buff[1024];
 
-	s_mmsize.sz = sizeof(s_mmsize);
-	s_mmsize.ver = 1;
-	res = sceLibcMspaceMallocStatsFast(s_mspace, &s_mmsize);
- 	return 0;
-}	
+  // Initialize a va_list to hold the variable arguments passed to the function.
+  va_list args;
+  va_start(args, format);
+
+  // Format the log message using the format string and the variable arguments.
+  vsprintf(buff, format, args);
+
+  // Clean up the va_list.
+  va_end(args);
+
+  // Append a newline character to the log message.
+  strcat(buff, "\n");
+
+  // Output the log message using sceKernelDebugOutText.
+  sceKernelDebugOutText(0, buff);
+
+  int fd = sceKernelOpen("/data/memory.log", O_WRONLY | O_CREAT | O_APPEND, 0777);
+  if (fd >= 0) {
+    sceKernelWrite(fd, & buff[0], strlen( & buff[0]));
+    sceKernelClose(fd);
+  }
+}
+
+int malloc_init(void) {
+  int res;
+
+  if (s_mspace)
+    return 0;
+
+  res = sceKernelReserveVirtualRange(&s_mem_start, MEM_SIZE, 0, MEM_ALIGN);
+  if (res < 0) {
+    log_for_memory("sceKernelReserveVirtualRange failed with error code 0x%X", res);
+    return 1;
+  }
+
+  res = sceKernelMapNamedSystemFlexibleMemory(&s_mem_start, MEM_SIZE, SCE_KERNEL_PROT_CPU_RW, SCE_KERNEL_MAP_FIXED, "User Mem");
+  if (res < 0) {
+    //log_for_memory("sceKernelMapNamedSystemFlexibleMemory failed with error code 0x%X", res);
+    log_for_memory("trying backup mspace");
+    int32_t res = SCE_OK;
+    if (SCE_OK != (res = sceKernelAllocateMainDirectMemory(maxheap, KB(64), SCE_KERNEL_WB_ONION, &phyAddr))) {
+      log_for_memory("sceKernelAllocateMainDirectMemory() Failed = 0x%X", res); // with 0x%08X \n", (unat)res);
+      return 1;
+    }
+    if (SCE_OK != (res = sceKernelMapDirectMemory( & s_mem_start, maxheap, SCE_KERNEL_PROT_CPU_RW, 0, phyAddr, KB(64)))) {
+      log_for_memory("sceKernelMapDirectMemory() Failed = 0x%X", res); // with 0x%08X \n", (unat)res);
+      return 1;
+    }
+    s_mem_size = maxheap;
+  }
+
+  s_mspace = sceLibcMspaceCreate("User Mspace", s_mem_start, s_mem_size, 0);
+  if (!s_mspace) {
+    log_for_memory("sceLibcMspaceCreate() Failed = 0x%X", s_mspace);
+    return 1;
+  } else
+    log_for_memory("sceLibcMspaceCreate() successful");
+
+  s_mmsize.sz = sizeof(s_mmsize);
+  s_mmsize.ver = 1;
+  res = sceLibcMspaceMallocStatsFast(s_mspace, &s_mmsize);
+  log_for_memory("sceLibcMspaceMallocStatsFast() returned %i", res);
+  return 0;
+}		
 int malloc_finalize(void)
 {
 	int res;
@@ -215,4 +278,3 @@ void get_user_mem_size(size_t *max_mem, size_t *cur_mem)
 	*max_mem += s_mmsize.curSysSz;
 	*cur_mem += s_mmsize.curSysSz - s_mmsize.curUseSz;
 }
-
